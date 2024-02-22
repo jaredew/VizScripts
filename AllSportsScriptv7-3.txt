@@ -1,0 +1,356 @@
+'====================================================
+' ALL SPORTS SCRIPT v.7.3 ~ Col Sanders, Alex Seflinger 
+' Greg Sanders - 07/07/2015 
+' greg.sanders@fox.com
+' Alex Seflinger - 09/26/2019
+' alex.seflinger@fox.com
+'
+' Use this script to find Tagged containers and apply a teams element.
+' Tag Codes go into a InfoText Plugin. Build Ins > Container Plugins > Global > InfoText
+' Tag Codes as contstructed of 3 main parts <teamNumberOrStyle>.<folder>.<type>
+' Examples:
+' TEAM1.3DF.IMAGE                 		- Will get the IMAGE for TEAM 1 from the 3DF folder 
+' TEAM1.3DS.IMAGE                 		- Will get the IMAGE for TEAM 1 from the 3DS folder
+' TEAM2.3DS.GEOM                  		- Will get the GEOM for TEAM 2 from the 3DS folder
+' TEAM1.MAT_BASE.MATERIAL.LIT							- Will get the MATERIAL for TEAM 1 from the MAT_BASE folder and set it to recive light
+' TEAM1.MAT_BASE.MATERIAL.UNLIT					- Will get the MATERIAL for TEAM 1 from the MAT_BASE folder and set it to NOT recive light
+' TEAM2.MAT_BASE.IMAGE									- Will get the IMAGE for TEAM 2 from the MAT_BASE folder
+'
+' === type === 
+' type = One of the 3 types of elements you want this container to get 
+' Avalable types are: IMAGE, GEOM, MATERIAL
+
+' === folder ===
+' folder = the Team Element folder to get this TYPE from
+' Some examples are: 3DF, 3DS, 3DV, MAT_BASE, MAT_SECONDARY
+' Note that not all folders have all 3 types of elements in them.
+
+' === teamNumberOrStyle ===
+' teamNumberOrStyle = Either the team number as (1-100) or the Global Style as "style"  
+
+' === Ver History ===
+' v7.3 - Added check for C, D, E, and W:\ file paths when looking for windows paths (1-18-2024 GR-265212 - Jared.Ewing@fox.com)
+'
+' v.7.1 - Added check for "O:\" file paths when looking for windows paths
+'
+' v.7 - Removed all file path checks (Windows and Graphic Hub) to improve performance
+'
+' v.5.2.1 - (Performance update: Alex Seflinger - 11/03/2018)
+'     Changed file path logic in SetElement subroutine so it checks file path *before* checking for hub existence.
+'     This was previously reversed, and hub check on nonexistent items caused certain machines to slow down and lock up.
+'
+' v.5.2 - Added ability to input a full absolute file path into a team field.
+'     If concatinated SPORT/LEAGUE/TEAMx does not exist on the Graphics Hub 
+'     then script will check if Windows file exists using the TEAMx's value as an full file path.
+'
+' v.5.1 - Added "OR _TaggedContainersArr[i].teamNumberOrStyle = "STYLE" to ChangeTeam Sub to change  "STYLE" tags anytime the team was changed
+'     Fixed issue with style OFF and team 1 not changeing unless Style was turned ON then OFF again.
+'
+' 
+' v.5 Initial Build
+
+'===================================================  
+Structure TaggedContainer
+  container as Container
+  type as String
+  folder as String
+  teamNumberOrStyle as String
+  lit as String
+end Structure
+
+dim _TaggedContainersArr as Array[TaggedContainer]
+dim _cArr as Array[Container]
+dim _ElementArr as Array[String]
+dim _sPath as String
+dim _count as Integer
+dim _InitFinished as Boolean = False
+
+
+
+'=== GUI =============================================
+sub OnInitParameters()
+  println "Start OnInitParameters..."
+  RegisterParameterString("style", "Base Style", "FOX", 50, 100, "")
+  RegisterParameterInt("styleActive", "Style 0=Off | 1=On", 1, 0, 1)
+  RegisterParameterString("sport", "Sport", "SPORT", 50, 100, "")
+  RegisterParameterString("league", "League", "LEAGUE", 50, 100, "")
+  RegisterPushButton("findContainers", "Find Containers", 1)
+  RegisterParameterInt("count", "Number of Teams", 1, 1, 100)
+  for i = 1 to 100
+    RegisterParameterString("team"&i, "Team"&i, "Team"&i, 50, 100, "")
+  next
+  RegisterInfoText("All Sports Script v7.3 ~ Col Sanders, Alex Seflinger ")
+  println "End OnInitParameters..."
+end sub
+
+'=== Runs on script compile or scene load ==============
+sub OnInit()
+  println "OnInit..."
+  BuildArrayOfElements()
+    '---This is the list of Names to look for
+  TeamCount()
+    '---Edit GUI for number of teams wanted
+  FindContainers()
+    '---Search through all containers in scene to Find those that have either a Name of InfoText
+end sub
+
+'=== Action for GUI buttons ============================
+sub OnExecAction(buttonId As Integer)
+  select case buttonId
+  case 1
+    FindContainers()
+  end select
+end sub
+
+'=== Action for GUI Parameters ==========================
+sub OnParameterChanged(parameterName As String)
+  '---These parameterName checks will ONLY run once the script is done initalizing and _InitFinished = True.
+  '---This is to help speed scene loading time in Trio 
+  println "_InitFinished = " & _InitFinished
+  if _InitFinished = True then
+    println "Now Tracking Parameters"
+    
+    '---Change was made to the sport or league 
+    if parameterName = "sport" OR parameterName = "league" then
+      ChangedSportOrLeague()
+    end if
+    
+    if parameterName.StartsWith( "team" ) then
+      ChangeTeam( parameterName )
+    end if
+    
+    '---Check Style
+    if parameterName = "style" OR parameterName = "styleActive" then
+      ChangeStyle()
+    end if
+    
+    if parameterName = "count" then
+      TeamCount()
+    end if
+
+  end if
+  
+  '---Last item to be Registered in OnInitParameters(), sets the _InitFinished boolean to True  
+  if parameterName = "info" then
+    _InitFinished = True
+    println "Initalization is finished, now watching user parameters for changes..."
+  end if
+end sub
+
+
+'=== Search through all containers in scene to Find those that are tagged ======================
+sub FindContainers()
+  '---Clear _cArr of all values
+  _cArr.Clear()
+  _TaggedContainersArr.Clear()
+  
+  '---Fill allContainersArr with all of this scenes containers
+  dim allContainersArr as Array[Container]
+  This.FindSuperContainer("object").GetContainerandSubContainers( allContainersArr, false )
+
+  '---place into _cArr any containers from allContainersArr that have one of the elements in its name 
+  for i = allContainersArr.LBound to allContainersArr.UBound
+    '---Container loop
+    if allContainersArr[i].InfoText.Text.Match( "TEAM" ) OR allContainersArr[i].InfoText.Text.Match( "STYLE" ) then
+      dim temp as TaggedContainer
+            
+      '---Splitting process for found containers InfoText
+      dim values as Array[String]
+      allContainersArr[i].InfoText.Text.Split(".", values)
+      
+      '---Put Values into temp
+      temp.container = allContainersArr[i]
+      temp.teamNumberOrStyle = values[0]
+      temp.folder = values[1]
+      temp.type = values[2]
+            
+      '---Check if "LIT or UNLIT is used"
+      if values.size > 3 then
+        if values[3] = "LIT" then
+          temp.lit = "1"
+        elseif values[3] = "UNLIT" then
+          temp.lit = "0"
+        end if
+      end if
+      
+      '---Push found Container into _cArr
+      _TaggedContainersArr.Push( temp )
+    
+    end if
+  
+  next
+  println(3, "Number of Containers Found With Tags = " & _TaggedContainersArr.Size)
+  
+end sub
+
+
+'=== This is the list of folder tags to look for ===============
+sub BuildArrayOfElements()
+  println "BuildArrayOfElements..."
+  _ElementArr.Clear()
+  _ElementArr.Push("IMAGE")
+  _ElementArr.Push("GEOM")
+  _ElementArr.Push("MATERIAL")
+end sub
+
+
+'=== Edit GUI for number of teams wanted =======================
+sub TeamCount()
+    for i = 0 to 100
+      SendGuiParameterShow("team"&i, HIDE)
+    next
+    For i = 1 To GetParameterInt("count")
+      SendGuiParameterShow("team"&i, SHOW)
+    Next
+end sub
+
+'=== Sport or League Changed ===================================
+sub ChangedSportOrLeague()
+  println "ChangedSportOrLeague..."
+  '---Process ALL teams 
+  for i = _TaggedContainersArr.LBound to _TaggedContainersArr.UBound
+    SetElement(_TaggedContainersArr[i])
+  next
+
+end sub
+
+'=== A Team Changed =============================================
+sub ChangeTeam( parameterName as String )
+  println "ChangeTeam..."
+  dim teamNumber as String = parameterName
+  teamNumber.MakeUpper()
+  println "teamNumber = " & teamNumber  
+  println(13, "_TaggedContainersArr.teamNumberOrStyle")
+  
+  '---look in Array of TaggedContainer's and find those whoes teamNumberOrStyle = teamNumber
+  '---Send found TaggedContainer structure to SetElement()  
+  for i = _TaggedContainersArr.LBound to _TaggedContainersArr.UBound
+    if _TaggedContainersArr[i].teamNumberOrStyle = teamNumber OR _TaggedContainersArr[i].teamNumberOrStyle = "STYLE" then
+      println "Found matching team number"
+      SetElement(_TaggedContainersArr[i])
+    end if
+  next
+
+end sub
+
+'=== The Style Changed =============================================
+sub ChangeStyle()
+  println "ChangeStyle..."
+  '----Process ONLY the changed Style
+  
+  '---look in Array of TaggedContainer's and find those whoes teamNumberOrStyle = "STYLE"
+  '---Send found TaggedContainer structure to SetElement()  
+  for i = _TaggedContainersArr.LBound to _TaggedContainersArr.UBound
+    if _TaggedContainersArr[i].teamNumberOrStyle = "STYLE" then
+      println "Found Style"
+      SetElement(_TaggedContainersArr[i])
+    end if
+  next
+
+end sub
+
+
+sub SetElement( taggedObject as TaggedContainer )
+  println(3, "Setting Element ...")
+  
+  '--Construct prefixPath
+  dim prefixPath as String = SetPrefixPath( taggedObject.teamNumberOrStyle )
+  '---Extract the name
+  dim name as String = SetTeamOrStyle( taggedObject.teamNumberOrStyle )
+  
+  '======================================
+  'THIS SECTION UPDATED for v.5.2.1
+  '   |     |
+  '   |     |
+  '  \|/   \|/
+  '   v     v
+  
+  '---Check for windows prefix ( "\\" )    ***[v.7.1 update -- checking ( "O:\" ) prefix as well]***
+  '------Check for file exists
+  '------If not exit sub
+  '------If true then apply it to the container based on its element Type
+  '---If no windows prefix, then check if exists in hub
+  '---If true then apply it to the container based on its element Type
+  
+  if name.StartsWith("\\\\") OR name.StartsWith("O:\\") OR name.StartsWith("o:\\") OR name.StartsWith("C:\\") OR name.StartsWith("c:\\") OR name.StartsWith("D:\\") OR name.StartsWith("d:\\") OR name.StartsWith("E:\\") OR name.StartsWith("e:\\") OR name.StartsWith("W:\\") OR name.StartsWith("w:\\") then
+    'if System.FileExists(name) = False then
+      'println "\"" & name & "\" does not exist"
+      'exit sub
+    'else 
+      Select Case taggedObject.type
+      Case "IMAGE"
+        taggedObject.container.CreateTexture( name )  
+      Case "GEOM"
+        taggedObject.container.CreateGeometry( prefixPath & "/" & taggedObject.folder & "/" & name )
+      Case "MATERIAL"
+        taggedObject.container.CreateMaterial( prefixPath & "/" & taggedObject.folder & "/" & name )
+        taggedObject.container.Material.Lit = cBool(taggedObject.lit)  'StringToBool(taggedObject.lit)
+      end Select
+    'end if
+  else
+    'if CheckForExists( prefixPath, taggedObject.type, name, taggedObject.folder) = True then
+      Select Case taggedObject.type
+      Case "IMAGE"
+        taggedObject.container.CreateTexture( prefixPath & "/" & taggedObject.folder & "/" & name ) 
+      Case "GEOM"
+        taggedObject.container.CreateGeometry( prefixPath & "/" & taggedObject.folder & "/" & name )
+      Case "MATERIAL"
+        taggedObject.container.CreateMaterial( prefixPath & "/" & taggedObject.folder & "/" & name )
+        taggedObject.container.Material.Lit = cBool(taggedObject.lit)  'StringToBool(taggedObject.lit)
+      end Select
+    'end if
+  end if
+  
+  taggedObject.container.Update()
+end sub
+
+
+'============== CUSTOM FUNCTIONS ==========================
+
+function SetPrefixPath( teamNumberOrStyle as String ) as String
+  if teamNumberOrStyle = "STYLE" then
+    '---Process as a Style
+    if GetParameterInt("styleActive") = 1 then
+      '---Construct _sPath based on user input of "style"
+      SetPrefixPath = "_TEAM_ELEMENTS_/STYLE/" & GetParameterString("style")
+    else
+      '---Construct _sPath based on user input of "sport" and "league"
+      SetPrefixPath = "_TEAM_ELEMENTS_/LOGOS/" & GetParameterString("sport") &"/"& GetParameterString("league")
+    end if
+  else 
+    '---Construct _sPath based on user input of "sport" and "league"
+    SetPrefixPath = "_TEAM_ELEMENTS_/LOGOS/" & GetParameterString("sport") &"/"& GetParameterString("league")
+  end if  
+  
+end function
+
+
+function SetTeamOrStyle( teamNumberOrStyle as String ) as String
+  if teamNumberOrStyle = "STYLE" then
+    '---Process as a Style
+    if GetParameterInt("styleActive") = 1 then
+      SetTeamOrStyle = GetParameterString("style")
+    elseif GetParameterInt("styleActive") = 0 then
+      SetTeamOrStyle = GetParameterString("team1")
+    end if
+  else 
+    '---Process as a Team
+    dim num as String = teamNumberOrStyle
+    num.Substitute("TEAM", "", true)
+    SetTeamOrStyle = GetParameterString("team" & num)
+  end if  
+  
+end function
+
+
+'function CheckForExists( prefixPath as String, type as String, name as String, folder as String ) as Boolean
+'  println(1, "Checking If File Exists...")
+'
+'  if sendCommand( type & " EXIST " & prefixPath & "/" & folder & "/" & name) = "0" then
+'    println(12, type & " File " & prefixPath & "/" & folder & "/" & name & " DOES NOT EXIST")
+'    CheckForExists = False
+'  else
+'    CheckForExists = True
+'  end if  
+'
+'end function
